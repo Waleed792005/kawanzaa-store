@@ -1,0 +1,70 @@
+# 
+# .github/workflows/main.yml
+# بناء مشروع React (esbuild) ونشره إلى GitHub Pages.
+# يعمل على الفرعين main و master لتفادي اختلاف الفرع الافتراضي.
+#
+
+name: Build and Deploy (Pages)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# نتأكد أن عمليات النشر لا تتداخل
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        # إن وُجد lockfile نستخدم npm ci، وإلا نستخدم npm install
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "Found package-lock.json → running npm ci"
+            npm ci
+          else
+            echo "No package-lock.json → running npm install"
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Build
+        # يفترض أن البناء يكتب إلى dist/ (عدّل إن كان مختلفًا)
+        run: npm run build
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
