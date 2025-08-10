@@ -1,0 +1,196 @@
+# 
+# .github/workflows/main.yml
+# بناء مشروع React (esbuild) ونشره إلى GitHub Pages مع:
+# 1) اكتشاف تلقائي لمجلد المشروع الذي يحوي package.json (WORKING_DIR).
+# 2) اختيار مدير الحزم (npm/yarn/pnpm) تلقائياً.
+# 3) تشخيص محسّن (عرض الملفات) وفحص مخرجات البناء (dist/build/out).
+#
+name: Build and Deploy (Pages)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# منع تداخل عمليات النشر
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      # سحب الشيفرة
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # اكتشاف مجلد المشروع الذي يحوي package.json وتخزينه في WORKING_DIR
+      - name: Detect project directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then
+            echo "WORKING_DIR=." >> "$GITHUB_ENV"
+            echo "Detected project directory at repo root (.)"
+          else
+            CANDIDATE="$(find . -path './.git' -prune -o -path './node_modules' -prune -o -type f -name 'package.json' -print | head -n 1 || true)"
+            if [ -z "$CANDIDATE" ]; then
+              echo "No package.json found in repository. Ensure your project is committed." >&2
+              exit 1
+            fi
+            DIR="$(dirname "$CANDIDATE")"
+            echo "WORKING_DIR=$DIR" >> "$GITHUB_ENV"
+            echo "Detected project directory at $DIR"
+          fi
+
+      # عرض هيكل مجلد المشروع لتسهيل التشخيص
+      - name: Show project layout
+        shell: bash
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          echo "---- Project directory: $(pwd) ----"
+          ls -la
+
+      # اختيار مدير الحزم تلقائياً وفق ملفات الـ lock
+      - name: Select package manager
+        id: pm
+        shell: bash
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          set -euo pipefail
+          if [ -f pnpm-lock.yaml ]; then
+            echo "pm=pnpm" >> "$GITHUB_OUTPUT"
+            echo "Selected package manager: pnpm"
+          elif [ -f yarn.lock ]; then
+            echo "pm=yarn" >> "$GITHUB_OUTPUT"
+            echo "Selected package manager: yarn"
+          else
+            echo "pm=npm" >> "$GITHUB_OUTPUT"
+            echo "Selected package manager: npm"
+          fi
+
+      # تهيئة Node مع كاش npm عند وجود lockfile
+      - name: Setup Node (cache npm)
+        if: steps.pm.outputs.pm == 'npm' && (hashFiles(format('{0}/package-lock.json', env.WORKING_DIR)) != '' || hashFiles(format('{0}/npm-shrinkwrap.json', env.WORKING_DIR)) != '')
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            ${{ env.WORKING_DIR }}/package-lock.json
+            ${{ env.WORKING_DIR }}/npm-shrinkwrap.json
+
+      # تهيئة Node مع كاش yarn عند وجوده
+      - name: Setup Node (cache yarn)
+        if: steps.pm.outputs.pm == 'yarn'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+
+      # تهيئة Node بدون كاش عند عدم وجود lockfile لـ npm
+      - name: Setup Node (no cache)
+        if: steps.pm.outputs.pm == 'npm' && (hashFiles(format('{0}/package-lock.json', env.WORKING_DIR)) == '' && hashFiles(format('{0}/npm-shrinkwrap.json', env.WORKING_DIR)) == '')
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # تفعيل Corepack لـ yarn أو pnpm
+      - name: Enable Corepack
+        if: steps.pm.outputs.pm != 'npm'
+        run: corepack enable
+
+      # تثبيت الاعتمادات وفق مدير الحزم المختار
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.pm.outputs.pm }}" = "pnpm" ]; then
+            pnpm --version || corepack prepare pnpm@latest --activate
+            if [ -f pnpm-lock.yaml ]; then
+              pnpm install --frozen-lockfile
+            else
+              pnpm install
+            fi
+          elif [ "${{ steps.pm.outputs.pm }}" = "yarn" ]; then
+            if [ -f yarn.lock ]; then
+              yarn install --frozen-lockfile
+            else
+              yarn install
+            fi
+          else
+            if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+              npm ci
+            else
+              npm install --no-audit --no-fund
+            fi
+          fi
+
+      # البناء وفق مدير الحزم المختار
+      - name: Build
+        working-directory: ${{ env.WORKING_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.pm.outputs.pm }}" = "pnpm" ]; then
+            pnpm build
+          elif [ "${{ steps.pm.outputs.pm }}" = "yarn" ]; then
+            yarn build
+          else
+            npm run build
+          fi
+
+      # اكتشاف مجلد المخرجات تلقائياً (dist أو build أو out)
+      - name: Detect output directory
+        id: out
+        working-directory: ${{ env.WORKING_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidates=("dist" "build" "out")
+          found=""
+          for d in "${candidates[@]}"; do
+            if [ -d "$d" ]; then
+              found="$d"
+              break
+            fi
+          done
+          if [ -z "$found" ]; then
+            echo "No output directory found (tried: dist, build, out). Please configure your build to output to one of these directories or update the workflow." >&2
+            echo "Contents of project dir:" >&2
+            ls -la >&2
+            exit 1
+          fi
+          echo "dir=${found}" >> "$GITHUB_OUTPUT"
+          echo "Detected build output at: ${found}"
+
+      # رفع مخرجات البناء كقطعة للنشر
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ env.WORKING_DIR }}/${{ steps.out.outputs.dir }}
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # نشر صفحات GitHub
+      - name: Deploy to Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
