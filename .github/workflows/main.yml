@@ -1,0 +1,98 @@
+# 
+# .github/workflows/main.yml
+# بناء مشروع React (esbuild) ونشره إلى GitHub Pages.
+# يعمل على الفرعين main و master، ويدعم التشغيل اليدوي.
+# ملاحظة: إعداد cache في setup-node يفعّل فقط إذا وُجد Lockfile لتجنب خطأ عدم وجوده.
+#
+
+name: Build and Deploy (Pages)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# نتأكد أن عمليات النشر لا تتداخل
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      # سحب الشيفرة
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # تهيئة Node مع كاش npm إذا وُجد package-lock.json أو npm-shrinkwrap.json
+      - name: Setup Node (cache npm)
+        if: ${{ hashFiles('**/package-lock.json') != '' || hashFiles('**/npm-shrinkwrap.json') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # تهيئة Node مع كاش yarn إذا وُجد yarn.lock
+      - name: Setup Node (cache yarn)
+        if: ${{ hashFiles('**/yarn.lock') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+
+      # تهيئة Node بدون كاش إذا لم يوجد أي Lockfile (يتفادى الخطأ)
+      - name: Setup Node (no cache)
+        if: ${{ hashFiles('**/package-lock.json') == '' && hashFiles('**/npm-shrinkwrap.json') == '' && hashFiles('**/yarn.lock') == '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # تثبيت الاعتمادات: npm ci عند وجود lockfile، وإلا npm install
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "Found package-lock.json → running npm ci"
+            npm ci
+          elif [ -f npm-shrinkwrap.json ]; then
+            echo "Found npm-shrinkwrap.json → running npm ci"
+            npm ci
+          elif [ -f yarn.lock ]; then
+            echo "Found yarn.lock → running yarn install --frozen-lockfile"
+            corepack enable
+            yarn install --frozen-lockfile
+          else
+            echo "No lockfile found → running npm install"
+            npm install --no-audit --no-fund
+          fi
+
+      # البناء (يفترض الإخراج إلى dist/)
+      - name: Build
+        run: npm run build
+
+      # رفع المخرجات كقطعة للنشر
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # نشر صفحات GitHub
+      - name: Deploy to Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
